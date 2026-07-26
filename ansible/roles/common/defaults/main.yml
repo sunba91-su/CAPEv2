@@ -1,0 +1,18 @@
+---
+cape_user: cape
+cape_root: /opt/CAPEv2
+# Auto-detected from Python version in main.yml (uv for >= 3.13)
+use_uv: false
+
+# Debian package architecture mapping
+deb_architecture: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64', 'armv7l': 'armhf'}[ansible_architecture] | default(ansible_architecture) }}"
+
+# Tor
+tor_password: ""  # will be auto-generated if empty
+tor_control_port: 9051
+tor_dns_port: 5353
+tor_trans_port: 9040
+
+# de4dot
+de4dot_package_name: "de4dot_3.1.41592.3405-2_all.deb"
+de4dot_url: "http://archive.ubuntu.com/ubuntu/pool/universe/d/de4dot/{{ de4dot_package_name }}"

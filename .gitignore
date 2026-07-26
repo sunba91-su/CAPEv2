@@ -8,6 +8,7 @@
 __pycache__/
 .cache/
 .local/
+.agents/
 .env/
 .vscode
 env/
@@ -19,6 +20,7 @@ conf/*.conf
 web/web/secret_key.py
 tests/test_bson.bson.compressed
 *~
+skills-lock.json
 
 installer/cape-config.sh
 installer/kvm-config.sh
@@ -26,3 +28,17 @@ installer/kvm-config.sh
 docs/book/src/_build
 /.vs
 .venv
+
+# Go agent compiled binary
+agent/go/agent.exe
+
+# Ansible vault password (local dev only, never commit)
+.vault_pass
+
+# Ansible local inventory — contains private IPs
+ansible/inventory/hosts.ini
+
+# Ansible local vars — contains private URLs/paths
+ansible/inventory/group_vars/all/local_vars.yml
+ansible/inventory/group_vars/all/99-local_vars.yml
+ansible/inventory/group_vars/all/x-local_vars.yml

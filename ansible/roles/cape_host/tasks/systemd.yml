@@ -1,0 +1,143 @@
+---
+# ────────────────────────────────────────────────────────────────────
+# 7.1: Copy systemd unit files
+# ────────────────────────────────────────────────────────────────────
+
+- name: Copy systemd unit files from CAPE root
+  ansible.builtin.copy:
+    src: "{{ cape_root }}/systemd/{{ item }}"
+    dest: "/lib/systemd/system/{{ item }}"
+    remote_src: true
+    mode: "0644"
+  loop:
+    - cape.service
+    - cape-processor.service
+    - cape-web.service
+    - cape-rooter.service
+    - suricata.service
+  notify: daemon reload
+
+# ────────────────────────────────────────────────────────────────────
+# 7.2: Customize unit paths for non-default cape_root
+# ────────────────────────────────────────────────────────────────────
+
+- name: Replace CAPE_ROOT path in unit files
+  ansible.builtin.replace:
+    path: "/lib/systemd/system/{{ item }}"
+    regexp: "/opt/CAPEv2"
+    replacement: "{{ cape_root }}"
+  loop:
+    - cape.service
+    - cape-processor.service
+    - cape-web.service
+    - cape-rooter.service
+  when: cape_root != "/opt/CAPEv2"
+  notify: daemon reload
+
+- name: Remove ExecStartPre poetry lines
+  ansible.builtin.lineinfile:
+    path: "/lib/systemd/system/{{ item }}"
+    regexp: "^ExecStartPre=.*/poetry .*"
+    state: absent
+  loop:
+    - cape-fstab.service
+    - cape-rooter.service
+  failed_when: false
+  notify: daemon reload
+
+- name: Replace poetry run python with venv python3
+  ansible.builtin.replace:
+    path: "/lib/systemd/system/{{ item }}"
+    regexp: "/etc/poetry/bin/poetry run python"
+    replace: "{{ cape_root }}/.venv/bin/python3"
+  loop:
+    - cape.service
+    - cape-processor.service
+    - cape-web.service
+    - cape-rooter.service
+    - cape-dist.service
+    - cape-fstab.service
+    - cape-sigma-update.service
+  failed_when: false
+  notify: daemon reload
+
+- name: Replace poetry gunicorn with venv gunicorn
+  ansible.builtin.replace:
+    path: "/lib/systemd/system/guac-web.service"
+    regexp: "/etc/poetry/bin/poetry run gunicorn"
+    replace: "{{ cape_root }}/.venv/bin/gunicorn"
+  failed_when: false
+  notify: daemon reload
+
+- name: Replace poetry --directory run with venv python3 in sigma
+  ansible.builtin.replace:
+    path: "/lib/systemd/system/cape-sigma-update.service"
+    regexp: "/etc/poetry/bin/poetry --directory .* run python"
+    replace: "{{ cape_root }}/.venv/bin/python3"
+  failed_when: false
+  notify: daemon reload
+
+# ────────────────────────────────────────────────────────────────────
+# 7.3: Enable and start services
+# ────────────────────────────────────────────────────────────────────
+
+- name: Build list of services to enable
+  ansible.builtin.set_fact:
+    cape_services:
+      - cape
+      - cape-rooter
+      - cape-processor
+      - suricata
+      - cape-web
+
+- name: Enable and start CAPE services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ cape_services | reject('equalto', '') | list }}"
+  notify: daemon reload
+
+# ────────────────────────────────────────────────────────────────────
+# 7.4: Logrotate
+# ────────────────────────────────────────────────────────────────────
+
+- name: Write logrotate config for CAPE
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/cape.conf
+    content: |
+      {{ cape_root }}/storage/analyses/*/logs/*.log {
+          daily
+          missingok
+          rotate 7
+          compress
+          create
+          maxsize 10G
+      }
+
+      {{ cape_root }}/storage/analyses/*/files/*.log {
+          daily
+          missingok
+          rotate 7
+          compress
+          create
+          maxsize 10G
+      }
+    mode: "0644"
+
+- name: Run logrotate checkpoint
+  ansible.builtin.command:
+    cmd: /usr/sbin/logrotate /etc/logrotate.d/cape.conf
+  changed_when: false
+  failed_when: false
+
+# ────────────────────────────────────────────────────────────────────
+# 7.5: jemalloc
+# ────────────────────────────────────────────────────────────────────
+
+- name: Install jemalloc
+  ansible.builtin.apt:
+    pkg:
+      - libjemalloc-dev
+    state: present

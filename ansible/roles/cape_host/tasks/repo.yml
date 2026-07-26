@@ -1,0 +1,195 @@
+---
+- name: Add CAPE root to git safe.directory list
+  ansible.builtin.git_config:
+    name: safe.directory
+    scope: global
+    value: "{{ cape_root }}"
+
+- name: Clone CAPEv2 repository
+  ansible.builtin.git:
+    repo: "{{ cape_repo_url }}"
+    dest: "{{ cape_root }}"
+    depth: 1
+    version: master
+    force: false
+
+- name: Ensure CAPE root ownership
+  ansible.builtin.file:
+    path: "{{ cape_root }}"
+    state: directory
+    owner: "{{ cape_user }}"
+    group: "{{ cape_user }}"
+    recurse: true
+
+- name: Create Python virtual environment with uv
+  ansible.builtin.command:
+    cmd: >
+      /usr/local/bin/uv venv "{{ cape_root }}/.venv"
+    creates: "{{ cape_root }}/.venv/pyvenv.cfg"
+  become: true
+  become_user: "{{ cape_user }}"
+  when: use_uv
+
+- name: Configure Poetry for in-project venv
+  ansible.builtin.command:
+    cmd: >
+      /etc/poetry/bin/poetry config virtualenvs.in-project true
+  become: true
+  become_user: "{{ cape_user }}"
+  changed_when: false
+  when: not use_uv
+
+- name: Create Python virtual environment for CAPE
+  ansible.builtin.command:
+    cmd: >
+      /usr/bin/python3 -m venv "{{ cape_root }}/.venv"
+    creates: "{{ cape_root }}/.venv/pyvenv.cfg"
+  become: true
+  become_user: "{{ cape_user }}"
+  when: not use_uv
+
+- name: Install pip in venv via ensurepip
+  ansible.builtin.command:
+    cmd: "{{ cape_root }}/.venv/bin/python3 -m ensurepip --upgrade --default-pip"
+  become: true
+  become_user: "{{ cape_user }}"
+  changed_when: false
+  failed_when: false
+  when: not use_uv
+
+- name: Upgrade pip in venv
+  ansible.builtin.command:
+    cmd: "{{ cape_root }}/.venv/bin/pip install --upgrade pip setuptools wheel"
+  become: true
+  become_user: "{{ cape_user }}"
+  changed_when: false
+  failed_when: false
+  when: not use_uv
+
+- name: Sync dependencies with uv
+  ansible.builtin.command:
+    cmd: /usr/local/bin/uv sync --no-install-project
+    chdir: "{{ cape_root }}"
+  become: true
+  become_user: "{{ cape_user }}"
+  environment:
+    PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+    CRYPTOGRAPHY_DONT_BUILD_RUST: "1"
+  when: use_uv
+
+- name: Install CAPE dependency build requirements
+  ansible.builtin.apt:
+    pkg:
+      - libpq-dev
+      - libxslt1-dev
+      - libre2-dev
+      - python3-greenlet
+      - python3-gevent
+      - python3-psycopg2
+    state: present
+
+- name: Sync dependencies with Poetry (may fail on Python 3.14 — upstream incompatibility)
+  ansible.builtin.command:
+    cmd: /etc/poetry/bin/poetry install
+    chdir: "{{ cape_root }}"
+  become: true
+  become_user: "{{ cape_user }}"
+  environment:
+    PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+    CRYPTOGRAPHY_DONT_BUILD_RUST: "1"
+  ignore_errors: true
+  when: not use_uv
+
+# The poetry.lock pins old versions (greenlet 3.0.3, gevent 24.2.1,
+# orjson 3.10.15, lxml 5.3.0, pydantic-core 2.33.2) that lack Python 3.14
+# wheels and fail to compile from source.  poetry install uninstalls
+# pre-existing packages first, so no amount of pre-poetry pip can save
+# them.  Install everything here (post-poetry) via pip to get prebuilt
+# cp314 wheels from PyPI.
+- name: Install all broken Python packages after poetry
+  ansible.builtin.command:
+    cmd: "{{ cape_root }}/.venv/bin/pip install sflock sqlalchemy sqlparse txaio werkzeug uvicorn setproctitle pyzipper gevent greenlet orjson --no-deps"
+  become: true
+  become_user: "{{ cape_user }}"
+  changed_when: false
+  failed_when: false
+  when: not use_uv
+
+- name: Install libvirt Python bindings
+  ansible.builtin.apt:
+    pkg:
+      - python3-libvirt
+    state: present
+
+- name: Detect venv site-packages directory
+  ansible.builtin.command:
+    cmd: "{{ cape_root }}/.venv/bin/python3 -c 'import sysconfig; print(sysconfig.get_path(\"platlib\"))'"
+  register: _venv_platlib_dir
+  changed_when: false
+  when: not use_uv
+
+- name: Create .venv site-packages directory for libvirt .pth
+  ansible.builtin.file:
+    path: "{{ _venv_platlib_dir.stdout }}"
+    state: directory
+    mode: "0755"
+  when: not use_uv
+  failed_when: false
+
+- name: Make libvirt accessible from venv
+  ansible.builtin.copy:
+    dest: "{{ _venv_platlib_dir.stdout }}/libvirt.pth"
+    content: "/usr/lib/python3/dist-packages\n"
+    mode: "0644"
+  when: not use_uv
+  failed_when: false
+
+- name: Install yara-python system dependencies
+  ansible.builtin.apt:
+    pkg:
+      - libjansson-dev
+      - libmagic1
+      - libmagic-dev
+    state: present
+
+- name: Install yara-python with uv
+  ansible.builtin.command:
+    cmd: >
+      /usr/local/bin/uv pip install yara-python
+      --no-binary :all:
+    chdir: "{{ cape_root }}"
+  become: true
+  become_user: "{{ cape_user }}"
+  when: use_uv
+
+- name: Install yara-python into venv
+  ansible.builtin.command:
+    cmd: >
+      "{{ cape_root }}/.venv/bin/pip" install yara-python
+      --no-binary :all:
+      --config-settings="--global-option=build"
+      --config-settings="--global-option=--enable-cuckoo"
+      --config-settings="--global-option=--enable-magic"
+      --config-settings="--global-option=--enable-profiling"
+    chdir: "{{ cape_root }}"
+  become: true
+  become_user: "{{ cape_user }}"
+  when: not use_uv
+
+# ────────────────────────────────────────────────────────────────────
+# Optional HTTP replay library for deep network analysis
+# ────────────────────────────────────────────────────────────────────
+
+- name: Install httpreplay with uv
+  ansible.builtin.command:
+    cmd: /usr/local/bin/uv pip install "git+https://github.com/CAPESandbox/httpreplay"
+  become: true
+  become_user: "{{ cape_user }}"
+  when: use_uv
+
+- name: Install httpreplay with poetry
+  ansible.builtin.command:
+    cmd: "{{ cape_root }}/.venv/bin/pip install git+https://github.com/CAPESandbox/httpreplay"
+  become: true
+  become_user: "{{ cape_user }}"
+  when: not use_uv
